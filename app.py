@@ -29,8 +29,9 @@ DEFAULT_IOU = float(os.getenv("YOLO_IOU", "0.45"))
 # Label deskriptif untuk model yang tersedia
 MODEL_DISPLAY_NAMES: Dict[str, str] = {
     "lyolo.onnx": "lYOLO",
-    "yolov3tiny.onnx": "YOLOv3 Tiny",
     "yolov8nano.onnx": "YOLOv8 Nano",
+    "yolov3tiny.onnx": "YOLOv3 Tiny",
+    "yolov26.onnx": "YOLOv26",
 }
 
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
@@ -50,6 +51,7 @@ def find_onnx_models() -> List[Path]:
         "lyolo.onnx",
         "yolov8nano.onnx",
         "yolov3tiny.onnx",
+        "yolov26.onnx",
         "best.onnx",
         "model.onnx",
         "yolov8.onnx",
@@ -193,6 +195,7 @@ def ensure_model_loaded(requested_model: Optional[str] = None) -> Optional[YOLOv
 
 def get_models_catalog() -> List[Dict[str, Any]]:
     """Mengembalikan daftar lengkap semua model .onnx beserta detailnya."""
+    preload_all_models()
     active_path = str(Path(detector.model_path).resolve()) if detector else None
     catalog: List[Dict[str, Any]] = []
 
@@ -484,14 +487,17 @@ INDEX_HTML = """
             color: rgba(255, 255, 255, 0.82);
         }
 
-        /* 3 Kartu Model Flat */
+        /* 4 Kartu Model Flat */
         .model-cards {
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 0.85rem;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 0.75rem;
             margin-bottom: 1rem;
         }
-        @media (max-width: 760px) {
+        @media (max-width: 900px) {
+            .model-cards { grid-template-columns: repeat(2, 1fr); }
+        }
+        @media (max-width: 540px) {
             .model-cards { grid-template-columns: 1fr; }
         }
         .model-card {

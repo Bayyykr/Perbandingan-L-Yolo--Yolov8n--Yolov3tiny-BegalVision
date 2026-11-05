@@ -119,7 +119,7 @@ def run_webcam_simulation(
     model: str | None = None,
 ):
     available_cams = scan_available_cameras()
-    model_candidates = ["lyolo.onnx", "yolov3tiny.onnx", "yolov8nano.onnx"]
+    model_candidates = ["lyolo.onnx", "yolov8nano.onnx", "yolov3tiny.onnx", "yolov26.onnx"]
     current_model = model
 
     # Jika user tidak menentukan --source, prioritaskan index 1 (Webcam USB Eksternal) jika ada
