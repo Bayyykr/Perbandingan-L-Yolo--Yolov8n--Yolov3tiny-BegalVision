@@ -2371,25 +2371,39 @@ def generate_mjpeg_stream(
                         if any(k in d.get("class_name", "").lower() for k in ["korban", "person", "orang", "mencurigakan"])
                     ]
 
-                    has_threat = (len(begal_dets) > 0 or len(senjata_dets) > 0)
+                    # OPSI B (Proteksi Ketat):
+                    # BAHAYA (Sirine Buzzer ON) HANYA jika terdeteksi KEDUANYA: Begal DAN Senjata!
+                    # Jika hanya salah satu (hanya begal tanpa sajam, atau hanya sajam), masuk status MENCURIGAKAN (Waspada, Buzzer OFF).
+                    has_begal = len(begal_dets) > 0
+                    has_senjata = len(senjata_dets) > 0
+                    has_both = (has_begal and has_senjata)
                     primary_label = "normal"
                     max_conf = 0.0
 
-                    if len(begal_dets) > 0:
-                        primary_label = "begal"
+                    if has_both:
+                        primary_label = "begal_bersenjata"
+                        max_conf = max(
+                            max(d.get("confidence", 0.0) for d in begal_dets),
+                            max(d.get("confidence", 0.0) for d in senjata_dets)
+                        )
+                    elif has_begal:
+                        primary_label = "begal"  # Hanya begal tanpa senjata -> Waspada
                         max_conf = max(d.get("confidence", 0.0) for d in begal_dets)
-                    elif len(senjata_dets) > 0:
-                        primary_label = "senjata"
+                    elif has_senjata:
+                        primary_label = "senjata"  # Hanya senjata tanpa begal -> Waspada
                         max_conf = max(d.get("confidence", 0.0) for d in senjata_dets)
                     elif len(korban_dets) > 0:
                         primary_label = "mencurigakan" if len(korban_dets) > 1 else "normal"
                         max_conf = max(d.get("confidence", 0.0) for d in korban_dets)
 
                     now_ts = time.time()
-                    if has_threat:
+                    if has_both:
                         streamer.last_threat_ts = now_ts
                         streamer.persisted_threat = {
                             "has_threat": True,
+                            "has_both": True,
+                            "has_begal": True,
+                            "has_senjata": True,
                             "primary_label": primary_label,
                             "max_conf": round(float(max_conf), 3),
                             "begal_count": len(begal_dets),
@@ -2407,10 +2421,13 @@ def generate_mjpeg_stream(
                         else:
                             streamer.latest_threat = {
                                 "has_threat": False,
+                                "has_both": False,
+                                "has_begal": has_begal,
+                                "has_senjata": has_senjata,
                                 "primary_label": primary_label,
                                 "max_conf": round(float(max_conf), 3),
-                                "begal_count": 0,
-                                "senjata_count": 0,
+                                "begal_count": len(begal_dets),
+                                "senjata_count": len(senjata_dets),
                                 "total_detections": len(detections),
                                 "timestamp": now_ts,
                                 "detections": detections,
