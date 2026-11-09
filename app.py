@@ -2353,9 +2353,23 @@ def generate_mjpeg_stream(
                     detections = result.get("detections", [])
 
                     # Ekstrak ancaman Begal/Senjata untuk disinkronkan ke Web & Fuzzy Logic
-                    begal_dets = [d for d in detections if d.get("class", "").lower() in ["begal"]]
-                    senjata_dets = [d for d in detections if d.get("class", "").lower() in ["senjata", "clurit", "pisau", "weapon", "knife"]]
-                    korban_dets = [d for d in detections if d.get("class", "").lower() in ["korban", "person", "orang"]]
+                    for d in detections:
+                        c_name = str(d.get("class_name") or d.get("class") or "").strip()
+                        d["class_name"] = c_name
+                        d["class"] = c_name  # Sinkronkan agar kompatibel dengan key 'class' dan 'class_name'
+
+                    begal_dets = [
+                        d for d in detections 
+                        if "begal" in d.get("class_name", "").lower()
+                    ]
+                    senjata_dets = [
+                        d for d in detections 
+                        if any(k in d.get("class_name", "").lower() for k in ["senjata", "clurit", "pisau", "weapon", "knife", "celurit", "parang", "pedang"])
+                    ]
+                    korban_dets = [
+                        d for d in detections 
+                        if any(k in d.get("class_name", "").lower() for k in ["korban", "person", "orang", "mencurigakan"])
+                    ]
 
                     has_threat = (len(begal_dets) > 0 or len(senjata_dets) > 0)
                     primary_label = "normal"
@@ -2371,17 +2385,38 @@ def generate_mjpeg_stream(
                         primary_label = "mencurigakan" if len(korban_dets) > 1 else "normal"
                         max_conf = max(d.get("confidence", 0.0) for d in korban_dets)
 
+                    now_ts = time.time()
+                    if has_threat:
+                        streamer.last_threat_ts = now_ts
+                        streamer.persisted_threat = {
+                            "has_threat": True,
+                            "primary_label": primary_label,
+                            "max_conf": round(float(max_conf), 3),
+                            "begal_count": len(begal_dets),
+                            "senjata_count": len(senjata_dets),
+                            "total_detections": len(detections),
+                            "timestamp": now_ts,
+                            "detections": detections,
+                        }
+                        streamer.latest_threat = streamer.persisted_threat
+                    else:
+                        # Pertahankan status bahaya selama 2.5 detik untuk mitigasi jitter frame kamera
+                        last_ts = getattr(streamer, "last_threat_ts", 0.0)
+                        if (now_ts - last_ts) < 2.5 and getattr(streamer, "persisted_threat", None):
+                            streamer.latest_threat = streamer.persisted_threat
+                        else:
+                            streamer.latest_threat = {
+                                "has_threat": False,
+                                "primary_label": primary_label,
+                                "max_conf": round(float(max_conf), 3),
+                                "begal_count": 0,
+                                "senjata_count": 0,
+                                "total_detections": len(detections),
+                                "timestamp": now_ts,
+                                "detections": detections,
+                            }
+
                     streamer.latest_detections = detections
-                    streamer.latest_threat = {
-                        "has_threat": has_threat,
-                        "primary_label": primary_label,
-                        "max_conf": round(float(max_conf), 3),
-                        "begal_count": len(begal_dets),
-                        "senjata_count": len(senjata_dets),
-                        "total_detections": len(detections),
-                        "timestamp": time.time(),
-                        "detections": detections,
-                    }
 
                     output_frame = draw_begal_annotations(
                         frame,
