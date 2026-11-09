@@ -2053,19 +2053,15 @@ def get_begal_color(class_id: int) -> Tuple[int, int, int]:
 
 
 def scan_available_cameras(max_index: int = 4) -> List[int]:
-    """Mencari index kamera yang terhubung (0 = default/laptop, 1 = webcam USB eksternal)."""
-    available: List[int] = []
-    for idx in range(max_index):
-        try:
-            cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW) if os.name == "nt" else cv2.VideoCapture(idx)
-            if cap.isOpened():
-                ret, _ = cap.read()
-                if ret:
-                    available.append(idx)
-                cap.release()
-        except Exception:
-            pass
-    return available
+    """
+    Mengembalikan daftar kamera yang tersedia tanpa membuka device berulang kali.
+    Mencegah hardware webcam berkedip dan crash C++ DirectShow pada Windows.
+    """
+    global camera_streamer
+    if camera_streamer and camera_streamer.is_connected:
+        curr = int(camera_streamer.source) if str(camera_streamer.source).isdigit() else 0
+        return [0, 1] if curr in [0, 1] else [curr, 0, 1]
+    return [0, 1]
 
 
 class VideoCameraStream:
@@ -2114,14 +2110,44 @@ class VideoCameraStream:
             src = int(src)
 
         try:
+            cap = None
             if isinstance(src, int) and os.name == "nt":
-                cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
-                if not cap.isOpened():
+                try:
                     cap = cv2.VideoCapture(src)
+                except Exception:
+                    cap = None
+                if cap is None or not cap.isOpened():
+                    try:
+                        cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
+                    except Exception:
+                        cap = None
+                # Jika source yang diminta (misal 1) tidak ada di laptop, otomatis fallback ke Kamera 0 (Internal)
+                if (cap is None or not cap.isOpened()) and src != 0:
+                    try:
+                        cap = cv2.VideoCapture(0)
+                    except Exception:
+                        cap = None
+                    if cap is None or not cap.isOpened():
+                        try:
+                            cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+                        except Exception:
+                            cap = None
+                    if cap is not None and cap.isOpened():
+                        self.source = 0
             else:
-                cap = cv2.VideoCapture(src)
+                try:
+                    cap = cv2.VideoCapture(src)
+                except Exception:
+                    cap = None
+                if (cap is None or not cap.isOpened()) and isinstance(src, int) and src != 0:
+                    try:
+                        cap = cv2.VideoCapture(0)
+                    except Exception:
+                        cap = None
+                    if cap is not None and cap.isOpened():
+                        self.source = 0
 
-            if cap.isOpened():
+            if cap is not None and cap.isOpened():
                 self.cap = cap
                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 640)
