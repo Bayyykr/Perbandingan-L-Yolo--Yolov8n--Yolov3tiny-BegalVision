@@ -2348,7 +2348,8 @@ def generate_mjpeg_stream(
             if with_ai and selected_model is not None and streamer.is_connected:
                 t0 = time.perf_counter()
                 try:
-                    result = selected_model.predict(frame, conf_thres=conf, iou_thres=iou)
+                    with model_lock:
+                        result = selected_model.predict(frame, conf_thres=conf, iou_thres=iou)
                     infer_ms = (time.perf_counter() - t0) * 1000.0
                     detections = result.get("detections", [])
 
@@ -2460,6 +2461,10 @@ def generate_mjpeg_stream(
                 b"Content-Length: " + str(len(frame_bytes)).encode() + b"\r\n\r\n"
                 + frame_bytes + b"\r\n"
             )
+    except (GeneratorExit, ConnectionResetError, BrokenPipeError):
+        pass
+    except Exception as e:
+        print(f"[STREAM INFO] Client disconnected: {e}")
     finally:
         with streamer.lock:
             streamer.active_viewers = max(0, streamer.active_viewers - 1)
@@ -2618,4 +2623,5 @@ if __name__ == "__main__":
     print(f" Status Kamera  : GET  http://127.0.0.1:{port}/camera/status")
     print(f" Endpoint API   : POST http://127.0.0.1:{port}/predict")
     print("=" * 65)
-    app.run(host="0.0.0.0", port=port, debug=True)
+    debug_mode = os.getenv("FLASK_DEBUG", "false").lower() in ("true", "1")
+    app.run(host="0.0.0.0", port=port, debug=debug_mode, use_reloader=False, threaded=True)
