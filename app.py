@@ -2,12 +2,13 @@ import base64
 import io
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-from flask import Flask, jsonify, render_template_string, request, send_file
+from flask import Flask, Response, jsonify, render_template_string, request, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
@@ -2030,6 +2031,453 @@ def predict_image():
         )
 
 
+# =====================================================================
+# Modul Continuous Live Streaming (MJPEG) untuk Webcam USB & YOLO AI
+# =====================================================================
+
+BEGAL_COLORS = [
+    (0, 0, 255),      # 0: begal (Merah)
+    (255, 165, 0),    # 1: korban (Biru/Oranye)
+    (255, 200, 0),    # 2: motor (Cyan)
+    (0, 0, 200),      # 3: senjata (Merah Tua)
+    (0, 200, 0),      # 4: status_safe (Hijau)
+    (0, 215, 255),    # 5: status_warning (Kuning/Emas)
+]
+
+
+def get_begal_color(class_id: int) -> Tuple[int, int, int]:
+    if 0 <= class_id < len(BEGAL_COLORS):
+        return BEGAL_COLORS[class_id]
+    np.random.seed(class_id + 42)
+    return tuple(int(c) for c in np.random.randint(50, 240, size=3))  # type: ignore
+
+
+def scan_available_cameras(max_index: int = 4) -> List[int]:
+    """Mencari index kamera yang terhubung (0 = default/laptop, 1 = webcam USB eksternal)."""
+    available: List[int] = []
+    for idx in range(max_index):
+        try:
+            cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW) if os.name == "nt" else cv2.VideoCapture(idx)
+            if cap.isOpened():
+                ret, _ = cap.read()
+                if ret:
+                    available.append(idx)
+                cap.release()
+        except Exception:
+            pass
+    return available
+
+
+class VideoCameraStream:
+    """
+    Background Threaded Video Capture untuk Webcam USB.
+    Menghilangkan buffer lag OpenCV sehingga streaming web selalu real-time (< 100ms).
+    Mendukung banyak viewer secara simultan tanpa overhead membuka device berkali-kali.
+    """
+
+    def __init__(self, source: int | str = 0):
+        self.source = source
+        self.cap: Optional[cv2.VideoCapture] = None
+        self.is_running = False
+        self.thread: Optional[threading.Thread] = None
+        self.lock = threading.Lock()
+        self.latest_frame: Optional[np.ndarray] = None
+        self.last_frame_time = 0.0
+        self.actual_fps = 0.0
+        self.active_viewers = 0
+        self.frame_count = 0
+        self.width = 640
+        self.height = 480
+        self.is_connected = False
+        self.error_msg: Optional[str] = None
+
+    def _open_capture(self) -> bool:
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+
+        src = self.source
+        if isinstance(src, str) and src.isdigit():
+            src = int(src)
+
+        try:
+            if isinstance(src, int) and os.name == "nt":
+                cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
+                if not cap.isOpened():
+                    cap = cv2.VideoCapture(src)
+            else:
+                cap = cv2.VideoCapture(src)
+
+            if cap.isOpened():
+                self.cap = cap
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 640)
+                self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 480)
+                self.is_connected = True
+                self.error_msg = None
+                return True
+            else:
+                self.cap = None
+                self.is_connected = False
+                self.error_msg = f"Tidak dapat membuka webcam pada source: {self.source}"
+                return False
+        except Exception as e:
+            self.cap = None
+            self.is_connected = False
+            self.error_msg = str(e)
+            return False
+
+    def start(self):
+        with self.lock:
+            if self.is_running:
+                return
+            self.is_running = True
+            self.thread = threading.Thread(target=self._update_loop, daemon=True)
+            self.thread.start()
+
+    def _update_loop(self):
+        fps_timer = time.perf_counter()
+        fps_frames = 0
+
+        while self.is_running:
+            if not self.is_connected or self.cap is None or not self.cap.isOpened():
+                if not self._open_capture():
+                    # Buat placeholder frame saat kamera belum terhubung
+                    dummy = np.zeros((480, 640, 3), dtype=np.uint8)
+                    cv2.putText(
+                        dummy,
+                        f"Webcam USB [{self.source}] Tidak Terdeteksi",
+                        (50, 220),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 0, 255),
+                        2,
+                    )
+                    cv2.putText(
+                        dummy,
+                        "Pastikan webcam terpasang pada port USB",
+                        (50, 260),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55,
+                        (200, 200, 200),
+                        1,
+                    )
+                    with self.lock:
+                        self.latest_frame = dummy
+                    time.sleep(1.0)
+                    continue
+
+            ret, frame = self.cap.read()
+            now = time.perf_counter()
+            if ret and frame is not None:
+                with self.lock:
+                    self.latest_frame = frame
+                    self.last_frame_time = now
+                    self.frame_count += 1
+                fps_frames += 1
+                if now - fps_timer >= 1.0:
+                    self.actual_fps = round(fps_frames / (now - fps_timer), 1)
+                    fps_frames = 0
+                    fps_timer = now
+            else:
+                self.is_connected = False
+                time.sleep(0.05)
+
+    def get_latest_frame(self) -> Optional[np.ndarray]:
+        with self.lock:
+            if self.latest_frame is not None:
+                return self.latest_frame.copy()
+            return None
+
+    def change_source(self, new_source: int | str):
+        with self.lock:
+            self.source = new_source
+            self.is_connected = False
+            if self.cap is not None:
+                try:
+                    self.cap.release()
+                except Exception:
+                    pass
+                self.cap = None
+
+    def stop(self):
+        self.is_running = False
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=1.0)
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+        self.is_connected = False
+
+
+camera_streamer: Optional[VideoCameraStream] = None
+camera_streamer_lock = threading.Lock()
+
+
+def get_camera_streamer(source: Optional[int | str] = None) -> VideoCameraStream:
+    """Mengambil atau menginisialisasi singleton VideoCameraStream."""
+    global camera_streamer
+    with camera_streamer_lock:
+        if camera_streamer is None:
+            default_source = os.getenv("CAMERA_SOURCE", "0")
+            if default_source.isdigit():
+                default_source = int(default_source)
+            initial_source = source if source is not None else default_source
+            camera_streamer = VideoCameraStream(source=initial_source)
+            camera_streamer.start()
+        elif source is not None and str(camera_streamer.source) != str(source):
+            camera_streamer.change_source(source)
+        return camera_streamer
+
+
+def draw_begal_annotations(
+    frame: np.ndarray,
+    detections: List[Dict[str, Any]],
+    model_name: str = "",
+    fps: float = 0.0,
+    infer_ms: float = 0.0,
+    show_hud: bool = True,
+) -> np.ndarray:
+    """Menggambar bounding box BegalVision dan HUD bar di atas frame."""
+    annotated = frame.copy()
+    h, w = annotated.shape[:2]
+
+    # 1. Gambar bounding box dan label deteksi
+    for det in detections:
+        bbox = det.get("bbox")
+        if not bbox:
+            continue
+        x1, y1 = int(round(bbox["x1"])), int(round(bbox["y1"]))
+        x2, y2 = int(round(bbox["x2"])), int(round(bbox["y2"]))
+        cls_id = int(det.get("class_id", 0))
+        cls_name = det.get("class_name", f"class_{cls_id}")
+        conf = float(det.get("confidence", 0.0))
+
+        color = get_begal_color(cls_id)
+        label = f"{cls_name} {conf:.2f}"
+
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+        text_y = max(y1, th + 8)
+        cv2.rectangle(annotated, (x1, text_y - th - 6), (x1 + tw + 6, text_y + 2), color, -1)
+        cv2.putText(
+            annotated,
+            label,
+            (x1 + 3, text_y - 2),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+    # 2. Gambar HUD Header (Status Bar CCTV BegalVision) jika diaktifkan
+    if show_hud:
+        cv2.rectangle(annotated, (0, 0), (w, 36), (15, 23, 42), -1)
+        cv2.circle(annotated, (18, 18), 6, (0, 0, 255), -1)  # Titik merah LIVE
+        hud_text = (
+            f"LIVE CCTV | BegalVision AI | Model: {model_name or 'YOLO'} | "
+            f"FPS: {fps:.1f} | Latensi: {infer_ms:.0f}ms | Objek: {len(detections)}"
+        )
+        cv2.putText(
+            annotated,
+            hud_text,
+            (32, 23),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.46,
+            (240, 240, 240),
+            1,
+            cv2.LINE_AA,
+        )
+
+    return annotated
+
+
+def generate_mjpeg_stream(
+    with_ai: bool = True,
+    model_name: Optional[str] = None,
+    conf: float = DEFAULT_CONF,
+    iou: float = DEFAULT_IOU,
+    source: Optional[int | str] = None,
+    quality: int = 80,
+    max_fps: int = 30,
+):
+    """Generator stream MJPEG multipart/x-mixed-replace."""
+    streamer = get_camera_streamer(source)
+    with streamer.lock:
+        streamer.active_viewers += 1
+
+    selected_model = ensure_model_loaded(model_name)
+    display_model_name = (
+        Path(selected_model.model_path).name if selected_model else "No Model"
+    )
+
+    frame_interval = 1.0 / max_fps if max_fps > 0 else 0.033
+    last_yield_time = 0.0
+
+    try:
+        while True:
+            now = time.perf_counter()
+            elapsed = now - last_yield_time
+            if elapsed < frame_interval:
+                time.sleep(max(0.001, frame_interval - elapsed))
+
+            frame = streamer.get_latest_frame()
+            if frame is None:
+                time.sleep(0.05)
+                continue
+
+            last_yield_time = time.perf_counter()
+
+            if with_ai and selected_model is not None and streamer.is_connected:
+                t0 = time.perf_counter()
+                try:
+                    result = selected_model.predict(frame, conf_thres=conf, iou_thres=iou)
+                    infer_ms = (time.perf_counter() - t0) * 1000.0
+                    output_frame = draw_begal_annotations(
+                        frame,
+                        result["detections"],
+                        model_name=display_model_name,
+                        fps=streamer.actual_fps,
+                        infer_ms=infer_ms,
+                    )
+                except Exception as e:
+                    output_frame = frame
+            else:
+                output_frame = frame
+
+            ret, buffer = cv2.imencode(
+                ".jpg", output_frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+            )
+            if not ret:
+                continue
+
+            frame_bytes = buffer.tobytes()
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n"
+                b"Content-Length: " + str(len(frame_bytes)).encode() + b"\r\n\r\n"
+                + frame_bytes + b"\r\n"
+            )
+    finally:
+        with streamer.lock:
+            streamer.active_viewers = max(0, streamer.active_viewers - 1)
+
+
+@app.route("/video_feed", methods=["GET"])
+def video_feed():
+    """
+    Endpoint Continuous Live Stream MJPEG dengan anotasi YOLO AI.
+    Dapat disematkan langsung di Website Laravel menggunakan:
+    <img src="http://flask-host:5000/video_feed" />
+    
+    Query Params:
+    - model: nama file .onnx (opsional)
+    - conf: confidence threshold (default: 0.25)
+    - iou: iou threshold (default: 0.45)
+    - source: index kamera (default: 0 atau env CAMERA_SOURCE)
+    - quality: kualitas JPEG 30-100 (default: 80)
+    - fps: batasan FPS maksimal (default: 30)
+    """
+    conf, iou, _, req_model = get_inference_params()
+    source_arg = request.args.get("source")
+    quality = int(request.args.get("quality", 80))
+    quality = max(30, min(100, quality))
+    max_fps = int(request.args.get("fps", 30))
+    max_fps = max(5, min(60, max_fps))
+
+    source_val = None
+    if source_arg is not None:
+        source_val = int(source_arg) if source_arg.isdigit() else source_arg
+
+    return Response(
+        generate_mjpeg_stream(
+            with_ai=True,
+            model_name=req_model,
+            conf=conf,
+            iou=iou,
+            source=source_val,
+            quality=quality,
+            max_fps=max_fps,
+        ),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+@app.route("/video_feed_raw", methods=["GET"])
+def video_feed_raw():
+    """
+    Endpoint Continuous Live Stream MJPEG Webcam USB Murni (tanpa inferensi AI).
+    Sangat hemat bandwidth & CPU.
+    """
+    source_arg = request.args.get("source")
+    quality = int(request.args.get("quality", 80))
+    max_fps = int(request.args.get("fps", 30))
+    source_val = int(source_arg) if (source_arg and source_arg.isdigit()) else source_arg
+
+    return Response(
+        generate_mjpeg_stream(
+            with_ai=False,
+            source=source_val,
+            quality=quality,
+            max_fps=max_fps,
+        ),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+@app.route("/camera/status", methods=["GET"])
+def camera_status():
+    """Mengembalikan status koneksi webcam USB, resolusi, FPS, dan kamera yang tersedia."""
+    streamer = get_camera_streamer()
+    available = scan_available_cameras(max_index=4)
+    return jsonify({
+        "success": True,
+        "is_connected": streamer.is_connected,
+        "current_source": streamer.source,
+        "resolution": {"width": streamer.width, "height": streamer.height},
+        "fps": streamer.actual_fps,
+        "active_viewers": streamer.active_viewers,
+        "available_cameras": available,
+        "error": streamer.error_msg,
+    })
+
+
+@app.route("/camera/source", methods=["POST"])
+def change_camera_source():
+    """Mengubah index webcam USB aktif secara dinamis."""
+    data = request.get_json(silent=True) or request.form.to_dict()
+    new_src = data.get("source")
+    if new_src is None:
+        return jsonify({"success": False, "error": "Parameter 'source' wajib diisi."}), 400
+
+    if str(new_src).isdigit():
+        new_src = int(new_src)
+
+    streamer = get_camera_streamer()
+    streamer.change_source(new_src)
+    return jsonify({
+        "success": True,
+        "message": f"Kamera berhasil dialihkan ke source: {new_src}",
+        "current_source": streamer.source,
+    })
+
+
 if __name__ == "__main__":
     preload_all_models()
     ok, msg = load_or_reload_model()
@@ -2043,6 +2491,9 @@ if __name__ == "__main__":
     print(f" Daftar Video   : {', '.join(available_videos) if available_videos else '-'}")
     port = int(os.getenv("PORT", "5000"))
     print(f" URL Website UI : http://127.0.0.1:{port}")
+    print(f" Live Stream AI : GET  http://127.0.0.1:{port}/video_feed")
+    print(f" Live Stream Raw: GET  http://127.0.0.1:{port}/video_feed_raw")
+    print(f" Status Kamera  : GET  http://127.0.0.1:{port}/camera/status")
     print(f" Endpoint API   : POST http://127.0.0.1:{port}/predict")
     print("=" * 65)
     app.run(host="0.0.0.0", port=port, debug=True)

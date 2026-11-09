@@ -134,3 +134,44 @@ Memuat ulang model `.onnx` dari folder tanpa perlu mematikan server.
 ```bash
 curl -X POST http://127.0.0.1:5000/reload
 ```
+
+---
+
+## Dokumentasi Endpoint Continuous Live Stream (Webcam USB & CCTV)
+
+### 5. `GET /video_feed`
+Endpoint utama siaran langsung (**Continuous Live Stream MJPEG**) yang sudah dianotasi secara *real-time* oleh model YOLO ONNX (`begal`, `korban`, `motor`, `senjata`).
+
+Sangat mudah disematkan ke dalam Website (Laravel Blade / HTML standar) cukup menggunakan tag `<img>`:
+```html
+<img src="http://FLASK_HOST:5000/video_feed?model=yolov8nano.onnx&conf=0.25" alt="Live CCTV BegalVision" />
+```
+
+**Query Parameters:**
+* `model` *(opsional)*: Nama file model ONNX (contoh: `lyolo.onnx`, `yolov8nano.onnx`, `yolov3tiny.onnx`).
+* `conf` *(opsional, default: `0.25`)*: Ambang batas confidence.
+* `iou` *(opsional, default: `0.45`)*: Ambang batas NMS IoU.
+* `source` *(opsional)*: Index kamera (contoh: `0` untuk webcam internal, `1` untuk webcam USB eksternal).
+* `quality` *(opsional, default: `80`)*: Kualitas kompresi JPEG (30–100).
+* `fps` *(opsional, default: `30`)*: Batas FPS streaming.
+
+### 6. `GET /video_feed_raw`
+Siaran langsung MJPEG murni dari Webcam USB tanpa proses inferensi AI (sangat hemat CPU/GPU).
+```html
+<img src="http://FLASK_HOST:5000/video_feed_raw" alt="Live Feed Raw" />
+```
+
+### 7. `GET /camera/status`
+Mengecek status koneksi webcam USB, daftar index kamera yang terhubung di komputer, resolusi, FPS aktual, dan jumlah viewer yang sedang menonton.
+```bash
+curl http://127.0.0.1:5000/camera/status
+```
+
+### 8. `POST /camera/source`
+Mengubah index kamera yang aktif secara dinamis tanpa perlu me-restart server Flask.
+```bash
+curl -X POST http://127.0.0.1:5000/camera/source \
+  -H "Content-Type: application/json" \
+  -d '{"source": 1}'
+```
+
