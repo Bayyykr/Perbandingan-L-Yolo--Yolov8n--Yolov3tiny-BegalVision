@@ -2090,6 +2090,17 @@ class VideoCameraStream:
         self.height = 480
         self.is_connected = False
         self.error_msg: Optional[str] = None
+        self.latest_detections: List[Dict[str, Any]] = []
+        self.latest_threat: Dict[str, Any] = {
+            "has_threat": False,
+            "primary_label": "normal",
+            "max_conf": 0.0,
+            "begal_count": 0,
+            "senjata_count": 0,
+            "total_detections": 0,
+            "timestamp": 0.0,
+            "detections": [],
+        }
 
     def _open_capture(self) -> bool:
         if self.cap is not None:
@@ -2339,9 +2350,42 @@ def generate_mjpeg_stream(
                 try:
                     result = selected_model.predict(frame, conf_thres=conf, iou_thres=iou)
                     infer_ms = (time.perf_counter() - t0) * 1000.0
+                    detections = result.get("detections", [])
+
+                    # Ekstrak ancaman Begal/Senjata untuk disinkronkan ke Web & Fuzzy Logic
+                    begal_dets = [d for d in detections if d.get("class", "").lower() in ["begal"]]
+                    senjata_dets = [d for d in detections if d.get("class", "").lower() in ["senjata", "clurit", "pisau", "weapon", "knife"]]
+                    korban_dets = [d for d in detections if d.get("class", "").lower() in ["korban", "person", "orang"]]
+
+                    has_threat = (len(begal_dets) > 0 or len(senjata_dets) > 0)
+                    primary_label = "normal"
+                    max_conf = 0.0
+
+                    if len(begal_dets) > 0:
+                        primary_label = "begal"
+                        max_conf = max(d.get("confidence", 0.0) for d in begal_dets)
+                    elif len(senjata_dets) > 0:
+                        primary_label = "senjata"
+                        max_conf = max(d.get("confidence", 0.0) for d in senjata_dets)
+                    elif len(korban_dets) > 0:
+                        primary_label = "mencurigakan" if len(korban_dets) > 1 else "normal"
+                        max_conf = max(d.get("confidence", 0.0) for d in korban_dets)
+
+                    streamer.latest_detections = detections
+                    streamer.latest_threat = {
+                        "has_threat": has_threat,
+                        "primary_label": primary_label,
+                        "max_conf": round(float(max_conf), 3),
+                        "begal_count": len(begal_dets),
+                        "senjata_count": len(senjata_dets),
+                        "total_detections": len(detections),
+                        "timestamp": time.time(),
+                        "detections": detections,
+                    }
+
                     output_frame = draw_begal_annotations(
                         frame,
-                        result["detections"],
+                        detections,
                         model_name=display_model_name,
                         fps=streamer.actual_fps,
                         infer_ms=infer_ms,
@@ -2443,9 +2487,15 @@ def video_feed_raw():
 
 @app.route("/camera/status", methods=["GET"])
 def camera_status():
-    """Mengembalikan status koneksi webcam USB, resolusi, FPS, dan kamera yang tersedia."""
+    """Mengembalikan status koneksi webcam USB, resolusi, FPS, dan kamera yang tersedia beserta deteksi ancaman AI."""
     streamer = get_camera_streamer()
     available = scan_available_cameras(max_index=4)
+    latest_threat = getattr(streamer, "latest_threat", {
+        "has_threat": False,
+        "primary_label": "normal",
+        "max_conf": 0.0,
+        "detections": [],
+    })
     return jsonify({
         "success": True,
         "is_connected": streamer.is_connected,
@@ -2454,7 +2504,27 @@ def camera_status():
         "fps": streamer.actual_fps,
         "active_viewers": streamer.active_viewers,
         "available_cameras": available,
+        "latest_threat": latest_threat,
+        "latest_detections": getattr(streamer, "latest_detections", []),
         "error": streamer.error_msg,
+    })
+
+
+@app.route("/camera/detections", methods=["GET"])
+def camera_detections():
+    """Endpoint real-time untuk mengambil deteksi BegalVision AI terkini."""
+    streamer = get_camera_streamer()
+    latest_threat = getattr(streamer, "latest_threat", {
+        "has_threat": False,
+        "primary_label": "normal",
+        "max_conf": 0.0,
+        "detections": [],
+    })
+    return jsonify({
+        "success": True,
+        "threat": latest_threat,
+        "detections": getattr(streamer, "latest_detections", []),
+        "timestamp": time.time(),
     })
 
 
