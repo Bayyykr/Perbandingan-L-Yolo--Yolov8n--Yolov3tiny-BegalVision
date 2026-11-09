@@ -2441,9 +2441,9 @@ def generate_mjpeg_stream(
                         }
                         streamer.latest_threat = streamer.persisted_threat
                     else:
-                        # Pertahankan status bahaya selama 2.5 detik untuk mitigasi jitter frame kamera
+                        # Pertahankan status bahaya selama 4.0 detik untuk mitigasi jitter frame kamera
                         last_ts = getattr(streamer, "last_threat_ts", 0.0)
-                        if (now_ts - last_ts) < 2.5 and getattr(streamer, "persisted_threat", None):
+                        if (now_ts - last_ts) < 4.0 and getattr(streamer, "persisted_threat", None):
                             streamer.latest_threat = streamer.persisted_threat
                         else:
                             streamer.latest_threat = {
@@ -2579,7 +2579,7 @@ def camera_status():
         "max_conf": 0.0,
         "detections": [],
     })
-    return jsonify({
+    res = jsonify({
         "success": True,
         "is_connected": streamer.is_connected,
         "current_source": streamer.source,
@@ -2591,6 +2591,9 @@ def camera_status():
         "latest_detections": getattr(streamer, "latest_detections", []),
         "error": streamer.error_msg,
     })
+    res.headers["Access-Control-Allow-Origin"] = "*"
+    res.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return res
 
 
 @app.route("/camera/detections", methods=["GET"])
